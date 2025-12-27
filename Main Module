@@ -1,0 +1,128 @@
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+
+local RankManager = {}
+
+-- ================= CONFIGURATION =================
+local GROUP_ID = "" 
+local SECRET_NAME = ""
+
+
+local WEBHOOK_URL = ""
+-- =================================================
+
+local API_KEY = nil
+pcall(function()
+	API_KEY = HttpService:GetSecret(SECRET_NAME)
+end)
+
+-- Private function for Discord Logging
+local function sendWebhook(adminName, targetName, rankNumber, status, errorMsg)
+	local isSuccess = (status == "Success")
+local user = game.Players:GetUserIdFromNameAsync(targetName)
+local user2 = game.Players:GetNameFromUserIdAsync(user)
+	local data = {
+		["embeds"] = {{
+			["title"] = isSuccess and "✅ Rank Updated" or "❌ Rank Update Failed",
+			["color"] = isSuccess and 65280 or 16711680,
+			["fields"] = {
+				{["name"] = "Admin", ["value"] = adminName, ["inline"] = true},
+				{["name"] = "Target User", ["value"] = user2, ["inline"] = true},
+				{["name"] = "Rank Attempted", ["value"] = tostring(rankNumber), ["inline"] = true}
+			},
+			["footer"] = {["text"] = "Group ID: " .. GROUP_ID},
+			["timestamp"] = DateTime.now():ToIsoDate()
+		}}
+	}
+
+	if not isSuccess and errorMsg then
+		table.insert(data.embeds[1].fields, {
+			["name"] = "Error Details", 
+			["value"] = "```" .. string.sub(tostring(errorMsg), 1, 100) .. "```", 
+			["inline"] = false
+		})
+	end
+
+	local success, response = pcall(function()
+		return HttpService:PostAsync(WEBHOOK_URL, HttpService:JSONEncode(data))
+	end)
+
+	-- No prints or warns as requested, but handles the DnsResolve internally
+end
+
+-- Public Function: RankManager.SetRank()
+function RankManager.SetRank(adminPlayerName, targetUsername, targetRankNumber)
+	if not API_KEY then return false, "API Key missing" end
+
+	local username = string.gsub(targetUsername, "%s+", "")
+	local rankNumber = tonumber(targetRankNumber)
+
+	-- 1. Get UserID
+	local successId, targetUserId = pcall(function()
+		return Players:GetUserIdFromNameAsync(username)
+	end)
+
+	if not successId then
+		sendWebhook(adminPlayerName, username, rankNumber, "Failed", "User does not exist.")
+		return false, "User does not exist"
+	end
+
+	-- 2. Fetch Group Roles
+	local rolesUrl = "https://apis.roblox.com/cloud/v2/groups/" .. GROUP_ID .. "/roles"
+	local rolesSuccess, rolesResponse = pcall(function()
+		return HttpService:RequestAsync({
+			Url = rolesUrl,
+			Method = "GET",
+			Headers = {["x-api-key"] = API_KEY}
+		})
+	end)
+
+	if not rolesSuccess or not rolesResponse.Success then
+		local user = game.Players:GetUserIdFromNameAsync(targetUsername)
+		local user2 = game.Players:GetNameFromUserIdAsync(user)
+		sendWebhook(adminPlayerName, user2, rankNumber, "Failed", "Group API Error.")
+		return false, "API Error"
+	end
+
+	local rolesData = HttpService:JSONDecode(rolesResponse.Body)
+	local targetRoleId = nil
+	for _, role in ipairs(rolesData.groupRoles) do
+		if role.rank == rankNumber then
+			targetRoleId = role.id
+			break
+		end
+	end
+
+	if not targetRoleId then
+		sendWebhook(adminPlayerName, username, rankNumber, "Failed", "Rank not found.")
+		return false, "Rank not found"
+	end
+
+	-- 3. Apply Rank Change
+	local patchUrl = "https://apis.roblox.com/cloud/v2/groups/" .. GROUP_ID .. "/memberships/" .. targetUserId
+	local patchPayload = HttpService:JSONEncode({
+		role = "groups/" .. GROUP_ID .. "/roles/" .. targetRoleId
+	})
+
+	local patchSuccess, patchResponse = pcall(function()
+		return HttpService:RequestAsync({
+			Url = patchUrl,
+			Method = "PATCH",
+			Headers = {
+				["x-api-key"] = API_KEY,
+				["Content-Type"] = "application/json"
+			},
+			Body = patchPayload
+		})
+	end)
+
+	if patchSuccess and patchResponse.Success then
+		sendWebhook(adminPlayerName, username, rankNumber, "Success")
+		return true
+	else
+		sendWebhook(adminPlayerName, username, rankNumber, "Failed", patchResponse and patchResponse.Body or "API Error")
+		return false
+	end
+end
+
+return RankManager
